@@ -5,6 +5,7 @@ host = "NETWORK"#edit
 port = 6667#no ssl support
 password = "PASSWORD"#edit
 defChannels = ["#CHAN1","#CHAN2"]#edit
+debugChan = "#CHAN1"#edit
 defModes = "+ixB"
 enforceOneIP = ["#CHAN1"]#edit
 enforceCaps = ["#CHAN2"]#edit

@@ -1,0 +1,4 @@
+DEPENDENCIES:
+Python2.5
+libcurl3-dev
+libxml2-dev

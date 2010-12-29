@@ -1,6 +1,91 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+
+import os,sys,signal,atexit
+import logging
+import operator
+import traceback
+import cStringIO as StringIO
+
+
+logging.basicConfig(level=logging.DEBUG,format='%(asctime)s %(levelname)s %(message)s')
+handler = logging.handlers.TimedRotatingFileHandler("logs/core.log","midnight")
+logging.getLogger("").addHandler(handler)
+debug = logging.debug
+info = logging.info
+warning = logging.warning
+error = logging.error
+critical = logging.critical
+exception = logging.exception
+atexit.register(logging.shutdown)
+
+
+def fork():
+    child = os.fork()
+    if child != 0:
+        print 'Parent exiting, child PID: %s' % child
+        os._exit(0)
+info('first fork')
+fork()
+info('setsid')
+os.setsid()
+info('second fork')
+fork()
+sys.stdin.close()
+info('closing everything')
+sys.stdin.close()
+sys.stdout.close()
+sys.stderr.close()
+sys.stdout = StringIO.StringIO()
+sys.stderr = StringIO.StringIO()
+os.close(0)
+os.close(1)
+os.close(2)
+fd = os.open('/dev/null', os.O_RDWR)
+os.dup2(fd, 0)
+os.dup2(fd, 1)
+os.dup2(fd, 2)
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
+info('Completed daemonization.  Current PID: %s', os.getpid())
+
+pidFile = 'zeta.pid'
+info('writing to pidfile')
+if pidFile:
+    try:
+        fd = file(pidFile, 'w')
+        pid = os.getpid()
+        fd.write('%s\n' % pid)
+        fd.close()
+        def removePidFile():
+            try:
+                os.remove(pidFile)
+                info('removed pidfile')
+            except EnvironmentError, e:
+                error('Could not remove pid file: %s', e)
+        atexit.register(removePidFile)
+    except EnvironmentError, e:
+        fatal('Error opening/writing pid file %s: %s', pidFile, e)
+        sys.exit(-1)
+
+
+
+
+
+
+
+
+info('starting program')
+
+
+
+
+
 import socket,string,time,textwrap
 import thread
 import botconfig as config
+import subprocess,re
+import plugins
 try:
     import feedparser
 except:
@@ -17,6 +102,7 @@ class IRC:
         self.port = config.port
         self.password = config.password
         self.defChannels = config.defChannels
+        self.debugChan = config.debugChan
         self.defModes = config.defModes
         self.enforceOneIP = config.enforceOneIP
         self.enforceCaps = config.enforceCaps
@@ -33,6 +119,7 @@ class IRC:
         self.identified = False
         self.chanlist = []
         self.chans = {}
+        #self.urlHandler = subprocess.Popen('./url', stdin=subprocess.PIPE)
         self.sock=socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((self.host, self.port))
         self.cron = {}
@@ -45,6 +132,15 @@ class IRC:
         self.tmpReplyTo = None
         self.lastUserIp = ""
         self.servicesRunning = True
+        self.loadPlugins()
+    def debug_msg(self,msg):
+        if(self.debugChan in self.chanlist):
+            self.raw("PRIVMSG %s :%s"%(self.debugChan,msg))
+        debug(msg)
+    def on_msg(self,t):
+        return
+    def on_join(self,t):
+        return
     def startup(self):
         self.join(",".join(self.defChannels))
         self.umode(self.defModes)
@@ -52,7 +148,7 @@ class IRC:
         self.raw("watch +NickServ")
     def raw(self,q):
         self.sock.send("%s\r\n"%q)
-        print "<<",q
+        info("<<"+str(q))
     def run(self):
         self.raw("USER %s 0 0 :%s"%(self.nick,self.nick))
         self.raw("NICK %s"% self.nick)
@@ -66,7 +162,7 @@ class IRC:
             self.buffer = lines.pop()
             for t in lines:
                 if not t: continue
-                print ">>",t
+                info(">>"+str(t))
                 self.handleData(t)
     def ns(self,n):
         self.raw("PRIVMSG NickServ %s"%n)
@@ -180,15 +276,18 @@ class IRC:
             nick = p[3]
             if nick.lower() == "nickserv":
                 self.servicesRunning = True
+                self.debug_msg("Services are currently running")
         if command == "600":
             nick = p[3]
             if nick.lower() == "nickserv":
                 self.servicesRunning = True
             self.ns("IDENTIFY %s"%self.password)
+            self.debug_msg("Services are currently running")
         if command == "601":
             nick = p[3]
             if nick.lower() == "nickserv":
                 self.servicesRunning = False
+                self.debug_msg("Services have STOPPED running")
         if command == "JOIN" and user!=self.nick:
             where = p[2][1:].lower()
             if self.tmpProcess == None:#give up doing multiple things at the same time
@@ -333,7 +432,7 @@ class IRC:
                         return self.notice(user,"Operation succeeded! You are now identified.")
                 if "identify" == lcmd:
                     if len(words)>1:
-                        print "identify attempt: ",fuser
+                        debug("identify attempt: "+fuser)
                         if self.makeIdentified(fuser,words[1],words[2]):
                             return self.notice(user,"Operation succeeded! You are now identified.")
                 if self.getAccess(fuser)==10001:
@@ -341,8 +440,8 @@ class IRC:
                         self.quit(message[5:])
                     if "raw" == lcmd:
                         self.raw(message[4:])
-                    if "print" == lcmd:
-                        print eval(message[6:])
+                    if "reload" == lcmd:
+                        self.reloadPlugins()
             if where[0]=="#":
                 if message[0]=="!":
                     words[0] = words[0].lower()
@@ -360,6 +459,13 @@ class IRC:
                                 self.ns("info %s"%words[1])
                     if words[0] in ("!status","!feed","!news") and self.getAccess(fuser) > 5:
                         thread.start_new_thread(self.checkRSS,(where,))
+                if 'http:' in message:
+                    url = re.findall("http://([^ \r\n]+)",message)
+                    #print url
+                    urlHandler = subprocess.Popen(['./url',url[0]],stdout=subprocess.PIPE)
+                    tOut = urlHandler.communicate()[0]
+                    if "Pokémon Infinity Online | Pokémon Online Game" not in tOut and tOut != "Title: \n":
+                        self.say(where,tOut)
                 if where in self.enforceCaps:
                     if message.upper()==message and len(message)>8:
                         if self.chans[where]["cankick"]:
@@ -373,6 +479,7 @@ class IRC:
                                 target = user.lower()
                                 if target in self.chans[where]["normals"]:
                                     self.kick(where,user,"Watch your language!")
+            self.on_msg(t)
         if command == "MODE":
             where = p[2].lower()
             if where[0]=="#":
@@ -579,8 +686,6 @@ class IRC:
         return False
     def getAccess(self,fuser):
         user = fuser.split("!")[1].lower()
-        print user
-        print self.identifiedUsers
         if user in self.identifiedUsers:
             return self.identifiedUsers[user]
         return 0
@@ -590,6 +695,16 @@ class IRC:
         return False
     def isOwner(self,user):
         return user in self.owners
+    def reloadPlugins(self):
+        print "Reloading...."
+        reload(plugins)
+        print "Configuring Components"
+        self.loadPlugins()
+        print "Done."
+    def loadPlugins(self):
+        self.on_msg = plugins.on_msg
+        self.on_join = plugins.on_join
+        plugins.on_load()
 
 irc = IRC()
 irc.run()
